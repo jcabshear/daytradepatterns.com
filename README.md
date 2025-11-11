@@ -1,0 +1,1 @@
+# daytradepatterns.com
