@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NASDAQ Pattern Scanner</title>
+    <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        
+        h1 {
+            text-align: center;
+            color: #667eea;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .controls {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .control-row {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .control-group {
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        select, button {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: all 0.3s;
+        }
+        
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+        
+        .results-stats {
+            display: flex;
+            gap: 30px;
+        }
+        
+        .stat {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            color: #666;
+            font-size: 0.9em;
+        }
+        
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stock-card {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .stock-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+            border-color: #667eea;
+        }
+        
+        .stock-ticker {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .stock-info {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        
+        .price {
+            font-size: 1.2em;
+            font-weight: 600;
+        }
+        
+        .price-change {
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        
+        .positive {
+            color: #10b981;
+            background: rgba(16, 185, 129, 0.1);
+        }
+        
+        .negative {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.1);
+        }
+        
+        .confidence-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        
+        .confidence-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s;
+        }
+        
+        .confidence-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 4px;
+        }
+        
+        .chart-container {
+            margin-top: 30px;
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            font-size: 1.2em;
+            color: #667eea;
+        }
+        
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .no-results {
+            text-align: center;
+            padding: 60px;
+            color: #666;
+        }
+        
+        .no-results-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+        }
+        
+        #chartDiv {
+            min-height: 600px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📈 NASDAQ Pattern Scanner</h1>
+        
+        <div class="controls">
+            <div class="control-row">
+                <div class="control-group">
+                    <label for="patternSelect">Pattern to Scan:</label>
+                    <select id="patternSelect">
+                        <option value="">-- Select a Pattern --</option>
+                    </select>
+                </div>
+                
+                <div class="control-group">
+                    <label for="timeframeSelect">Timeframe:</label>
+                    <select id="timeframeSelect">
+                        <option value="1m">1 Minute (Intraday)</option>
+                        <option value="5m">5 Minutes (Intraday)</option>
+                        <option value="15m">15 Minutes (Intraday)</option>
+                        <option value="1h">1 Hour (Intraday)</option>
+                        <option value="1d" selected>1 Day</option>
+                        <option value="1wk">1 Week</option>
+                        <option value="1mo">1 Month</option>
+                    </select>
+                </div>
+                
+                <div class="control-group">
+                    <label for="periodSelect">Period:</label>
+                    <select id="periodSelect">
+                        <option value="1d">1 Day</option>
+                        <option value="5d">5 Days</option>
+                        <option value="1mo" selected>1 Month</option>
+                        <option value="3mo">3 Months</option>
+                        <option value="6mo">6 Months</option>
+                        <option value="1y">1 Year</option>
+                        <option value="2y">2 Years</option>
+                    </select>
+                </div>
+            </div>
+            
+            <button id="scanButton" onclick="scanPatterns()">🔍 Scan for Pattern</button>
+        </div>
+        
+        <div id="resultsSection" style="display: none;">
+            <div class="results-header">
+                <h2>Scan Results</h2>
+                <div class="results-stats">
+                    <div class="stat">
+                        <div class="stat-value" id="matchCount">0</div>
+                        <div class="stat-label">Matches Found</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="scanCount">0</div>
+                        <div class="stat-label">Stocks Scanned</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="resultsGrid" class="results-grid"></div>
+        </div>
+        
+        <div id="loadingSection" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Scanning stocks for patterns...</p>
+        </div>
+        
+        <div id="noResultsSection" class="no-results" style="display: none;">
+            <div class="no-results-icon">🔍</div>
+            <h2>No Patterns Found</h2>
+            <p>Try adjusting the timeframe or selecting a different pattern.</p>
+        </div>
+        
+        <div id="chartContainer" class="chart-container" style="display: none;">
+            <h2 id="chartTitle">Stock Chart</h2>
+            <div id="chartDiv"></div>
+        </div>
+    </div>
+    
+    <script>
+        let currentResults = [];
+        
+        // Load available patterns on page load
+        async function loadPatterns() {
+            try {
+                const response = await fetch('/api/patterns');
+                const data = await response.json();
+                
+                const select = document.getElementById('patternSelect');
+                data.patterns.forEach(pattern => {
+                    const option = document.createElement('option');
+                    option.value = pattern.id;
+                    option.textContent = pattern.name;
+                    select.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading patterns:', error);
+            }
+        }
+        
+        // Scan for patterns
+        async function scanPatterns() {
+            const pattern = document.getElementById('patternSelect').value;
+            const timeframe = document.getElementById('timeframeSelect').value;
+            const period = document.getElementById('periodSelect').value;
+            
+            if (!pattern) {
+                alert('Please select a pattern to scan for');
+                return;
+            }
+            
+            // Show loading, hide results
+            document.getElementById('loadingSection').style.display = 'block';
+            document.getElementById('resultsSection').style.display = 'none';
+            document.getElementById('noResultsSection').style.display = 'none';
+            document.getElementById('chartContainer').style.display = 'none';
+            document.getElementById('scanButton').disabled = true;
+            
+            try {
+                const response = await fetch(
+                    `/api/scan?pattern=${pattern}&timeframe=${timeframe}&period=${period}`
+                );
+                const data = await response.json();
+                
+                currentResults = data.matches;
+                
+                // Update stats
+                document.getElementById('matchCount').textContent = data.total_matches;
+                document.getElementById('scanCount').textContent = data.total_scanned;
+                
+                // Hide loading
+                document.getElementById('loadingSection').style.display = 'none';
+                
+                if (data.matches.length > 0) {
+                    displayResults(data.matches);
+                    document.getElementById('resultsSection').style.display = 'block';
+                } else {
+                    document.getElementById('noResultsSection').style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error scanning patterns:', error);
+                alert('Error scanning patterns. Please try again.');
+                document.getElementById('loadingSection').style.display = 'none';
+            } finally {
+                document.getElementById('scanButton').disabled = false;
+            }
+        }
+        
+        // Display scan results
+        function displayResults(matches) {
+            const grid = document.getElementById('resultsGrid');
+            grid.innerHTML = '';
+            
+            matches.forEach(stock => {
+                const card = document.createElement('div');
+                card.className = 'stock-card';
+                card.onclick = () => loadChart(stock.ticker);
+                
+                const priceChangeClass = stock.price_change >= 0 ? 'positive' : 'negative';
+                const priceChangeSymbol = stock.price_change >= 0 ? '+' : '';
+                
+                card.innerHTML = `
+                    <div class="stock-ticker">${stock.ticker}</div>
+                    <div class="stock-info">
+                        <span class="price">$${stock.current_price}</span>
+                        <span class="price-change ${priceChangeClass}">
+                            ${priceChangeSymbol}${stock.price_change.toFixed(2)}%
+                        </span>
+                    </div>
+                    <div class="stock-info">
+                        <span style="color: #666;">Volume:</span>
+                        <span style="font-weight: 600;">${formatVolume(stock.volume)}</span>
+                    </div>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" style="width: ${stock.confidence}%"></div>
+                    </div>
+                    <div class="confidence-label">
+                        Confidence: ${stock.confidence}%
+                    </div>
+                `;
+                
+                grid.appendChild(card);
+            });
+        }
+        
+        // Load and display chart
+        async function loadChart(ticker) {
+            const timeframe = document.getElementById('timeframeSelect').value;
+            const period = document.getElementById('periodSelect').value;
+            
+            document.getElementById('chartTitle').textContent = `${ticker} - Interactive Chart`;
+            document.getElementById('chartContainer').style.display = 'block';
+            
+            try {
+                const response = await fetch(
+                    `/api/chart/${ticker}?timeframe=${timeframe}&period=${period}`
+                );
+                const chartData = await response.json();
+                
+                Plotly.newPlot('chartDiv', chartData.data, chartData.layout, {
+                    responsive: true,
+                    displayModeBar: true,
+                    modeBarButtonsToRemove: ['lasso2d', 'select2d']
+                });
+                
+                // Scroll to chart
+                document.getElementById('chartContainer').scrollIntoView({ 
+                    behavior: 'smooth',
+                    block: 'start'
+                });
+            } catch (error) {
+                console.error('Error loading chart:', error);
+                alert('Error loading chart. Please try again.');
+            }
+        }
+        
+        // Format volume numbers
+        function formatVolume(volume) {
+            if (volume >= 1000000000) {
+                return (volume / 1000000000).toFixed(2) + 'B';
+            } else if (volume >= 1000000) {
+                return (volume / 1000000).toFixed(2) + 'M';
+            } else if (volume >= 1000) {
+                return (volume / 1000).toFixed(2) + 'K';
+            }
+            return volume.toString();
+        }
+        
+        // Initialize
+        loadPatterns();
+    </script>
+</body>
+</html>
