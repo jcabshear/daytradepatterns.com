@@ -14,11 +14,6 @@ import time
 import os
 import asyncio
 
-# Alpaca imports for real-time data
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-
 from pattern_detector import PatternDetector
 
 app = FastAPI(title="NASDAQ Pattern Scanner")
@@ -28,19 +23,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Initialize pattern detector
 detector = PatternDetector()
-
-# Alpaca API Configuration
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-USE_ALPACA = bool(ALPACA_API_KEY and ALPACA_SECRET_KEY)
-
-# Initialize Alpaca client if keys are provided
-if USE_ALPACA:
-    alpaca_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-    print("✅ Alpaca real-time data enabled")
-else:
-    alpaca_client = None
-    print("⚠️  Using Yahoo Finance (15-min delay). Set ALPACA_API_KEY and ALPACA_SECRET_KEY for real-time data.")
 
 # Simple cache for bulk data (expires after 5 minutes)
 _data_cache = {}
@@ -337,22 +319,18 @@ async def scan_pattern_stream(
                 data_dict = _data_cache[cache_key]
             else:
                 # Fetch data
-                data_source = "Alpaca (Real-time)" if USE_ALPACA else "Yahoo Finance"
-                yield f"data: {json.dumps({'type': 'status', 'message': f'Downloading data from {data_source}...', 'progress': 10})}\n\n"
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Downloading data from Yahoo Finance...', 'progress': 10})}\n\n"
                 await asyncio.sleep(0.1)
                 
-                if USE_ALPACA:
-                    data_dict = fetch_alpaca_data(NASDAQ_TICKERS, timeframe, period)
-                else:
-                    tickers_str = " ".join(NASDAQ_TICKERS)
-                    bulk_data = yf.download(
-                        tickers=tickers_str,
-                        period=period,
-                        interval=timeframe,
-                        group_by='ticker',
-                        threads=True,
-                        progress=False
-                    )
+                tickers_str = " ".join(NASDAQ_TICKERS)
+                bulk_data = yf.download(
+                    tickers=tickers_str,
+                    period=period,
+                    interval=timeframe,
+                    group_by='ticker',
+                    threads=True,
+                    progress=False
+                )
                     
                     data_dict = {}
                     for ticker in NASDAQ_TICKERS:
@@ -473,22 +451,18 @@ async def scan_pattern(
             print(f"Using cached data for {cache_key}")
             data_dict = _data_cache[cache_key]
         else:
-            # Fetch data using Alpaca if available, otherwise yfinance
-            if USE_ALPACA:
-                print("🚀 Using Alpaca real-time data")
-                data_dict = fetch_alpaca_data(NASDAQ_TICKERS, timeframe, period)
-            else:
-                print("📊 Using Yahoo Finance (15-min delay)")
-                # Fallback to yfinance bulk download
-                tickers_str = " ".join(NASDAQ_TICKERS)
-                bulk_data = yf.download(
-                    tickers=tickers_str,
-                    period=period,
-                    interval=timeframe,
-                    group_by='ticker',
-                    threads=True,
-                    progress=False
-                )
+            # Fetch data using Yahoo Finance
+            print("📊 Using Yahoo Finance (15-min delay)")
+            # Fallback to yfinance bulk download
+            tickers_str = " ".join(NASDAQ_TICKERS)
+            bulk_data = yf.download(
+                tickers=tickers_str,
+                period=period,
+                interval=timeframe,
+                group_by='ticker',
+                threads=True,
+                progress=False
+            )
                 
                 # Convert to dict format
                 data_dict = {}
@@ -518,7 +492,7 @@ async def scan_pattern(
         print(f"Pattern: {pattern}")
         print(f"Timeframe: {timeframe}")
         print(f"Period: {period}")
-        print(f"Data Source: {'Alpaca (Real-time)' if USE_ALPACA else 'Yahoo Finance (15-min delay)'}")
+        print(f"Data Source: Yahoo Finance (15-min delay)")
         print("="*60 + "\n")
         
         for ticker in NASDAQ_TICKERS:
@@ -614,7 +588,7 @@ async def scan_pattern(
             "matches": results,
             "total_scanned": len(NASDAQ_TICKERS),
             "total_matches": len(results),
-            "data_source": "Alpaca (Real-time)" if USE_ALPACA else "Yahoo Finance (15-min delay)"
+            "data_source": "Yahoo Finance (15-min delay)"
         }
     
     except Exception as e:
@@ -629,16 +603,9 @@ async def get_chart(
 ):
     """Get interactive chart for a specific ticker"""
     try:
-        # Fetch data using Alpaca if available, otherwise yfinance
-        if USE_ALPACA:
-            data_dict = fetch_alpaca_data([ticker], timeframe, period)
-            if ticker in data_dict:
-                df = data_dict[ticker]
-            else:
-                raise HTTPException(status_code=404, detail="No data found")
-        else:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period=period, interval=timeframe)
+        # Fetch data using Yahoo Finance
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period, interval=timeframe)
         
         if df.empty:
             raise HTTPException(status_code=404, detail="No data found")
@@ -715,10 +682,8 @@ async def get_chart(
             row=2, col=1
         )
         
-        data_source = "Alpaca (Real-time)" if USE_ALPACA else "Yahoo Finance (15-min delay)"
-        
         fig.update_layout(
-            title=f'{ticker} - {timeframe} Chart ({data_source})',
+            title=f'{ticker} - {timeframe} Chart',
             yaxis_title='Price ($)',
             xaxis_rangeslider_visible=False,
             height=600,
