@@ -449,14 +449,127 @@
             background: rgba(255, 59, 48, 0.1);
         }
         
-        /* Loading State */
+        /* Loading State with Progress */
         .loading-container {
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            padding: 80px 20px;
+            padding: 60px 20px;
             gap: 24px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+        }
+        
+        .progress-container {
+            width: 100%;
+            max-width: 600px;
+        }
+        
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+        
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+            border-radius: 4px;
+            transition: width 0.3s ease;
+            position: relative;
+        }
+        
+        .progress-bar-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            animation: shimmer 2s infinite;
+        }
+        
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        
+        .scanning-details {
+            text-align: center;
+            margin-top: 20px;
+        }
+        
+        .scanning-ticker {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--accent-blue);
+            margin-bottom: 8px;
+        }
+        
+        .scanning-status {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+        
+        .live-matches {
+            margin-top: 24px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border-color);
+            width: 100%;
+        }
+        
+        .live-matches-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: var(--accent-green);
+        }
+        
+        .live-match-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: rgba(0, 200, 5, 0.1);
+            border: 1px solid rgba(0, 200, 5, 0.3);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .live-match-ticker {
+            font-weight: 700;
+            font-size: 16px;
+        }
+        
+        .live-match-confidence {
+            font-size: 14px;
+            color: var(--accent-green);
         }
         
         .spinner {
@@ -626,10 +739,27 @@
             <div id="stocksGrid" class="stocks-grid"></div>
         </div>
         
-        <!-- Loading State -->
+        <!-- Loading State with Progress -->
         <div id="loadingSection" class="loading-container hidden">
-            <div class="spinner"></div>
-            <div class="loading-text">Scanning market for patterns...</div>
+            <div class="progress-container">
+                <div class="progress-header">
+                    <span id="progressStatus">Initializing...</span>
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-fill" id="progressBarFill" style="width: 0%"></div>
+                </div>
+            </div>
+            
+            <div class="scanning-details">
+                <div class="scanning-ticker" id="currentTicker">--</div>
+                <div class="scanning-status" id="scanningStatus">Preparing scan...</div>
+            </div>
+            
+            <div class="live-matches" id="liveMatches" style="display: none;">
+                <div class="live-matches-title">✨ Patterns Found</div>
+                <div id="liveMatchesList"></div>
+            </div>
         </div>
         
         <!-- Empty State -->
@@ -672,7 +802,7 @@
             }
         }
         
-        // Scan for patterns
+        // Scan for patterns with real-time progress
         async function scanPatterns() {
             const pattern = document.getElementById('patternSelect').value;
             const timeframe = document.getElementById('timeframeSelect').value;
@@ -683,41 +813,96 @@
                 return;
             }
             
-            // Show loading
+            // Reset UI
             document.getElementById('loadingSection').classList.remove('hidden');
             document.getElementById('resultsSection').classList.add('hidden');
             document.getElementById('emptyState').classList.add('hidden');
             document.getElementById('chartContainer').classList.add('hidden');
             document.getElementById('scanButton').disabled = true;
+            document.getElementById('liveMatches').style.display = 'none';
+            document.getElementById('liveMatchesList').innerHTML = '';
+            
+            let liveResults = [];
             
             try {
-                const response = await fetch(
-                    `/api/scan?pattern=${pattern}&timeframe=${timeframe}&period=${period}`
+                // Use EventSource for Server-Sent Events
+                const eventSource = new EventSource(
+                    `/api/scan-stream?pattern=${pattern}&timeframe=${timeframe}&period=${period}`
                 );
-                const data = await response.json();
                 
-                currentResults = data.matches;
+                eventSource.onmessage = function(event) {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'status') {
+                        // Update status message
+                        document.getElementById('progressStatus').textContent = data.message;
+                        document.getElementById('progressPercent').textContent = data.progress + '%';
+                        document.getElementById('progressBarFill').style.width = data.progress + '%';
+                        document.getElementById('scanningStatus').textContent = data.message;
+                    }
+                    else if (data.type === 'scanning') {
+                        // Update current ticker being scanned
+                        document.getElementById('currentTicker').textContent = data.ticker;
+                        document.getElementById('scanningStatus').textContent = 
+                            `Scanning ${data.current} of ${data.total} stocks...`;
+                        document.getElementById('progressPercent').textContent = data.progress + '%';
+                        document.getElementById('progressBarFill').style.width = data.progress + '%';
+                    }
+                    else if (data.type === 'match') {
+                        // Pattern found! Add to live results
+                        liveResults.push(data.result);
+                        
+                        // Show live matches section
+                        document.getElementById('liveMatches').style.display = 'block';
+                        
+                        // Add to live matches list
+                        const matchItem = document.createElement('div');
+                        matchItem.className = 'live-match-item';
+                        matchItem.innerHTML = `
+                            <span class="live-match-ticker">${data.result.ticker}</span>
+                            <span class="live-match-confidence">${data.result.confidence}% confidence</span>
+                        `;
+                        document.getElementById('liveMatchesList').prepend(matchItem);
+                    }
+                    else if (data.type === 'error') {
+                        console.error('Scan error:', data);
+                    }
+                    else if (data.type === 'complete') {
+                        // Scan complete!
+                        eventSource.close();
+                        
+                        // Update final stats
+                        document.getElementById('matchCount').textContent = data.total_matches;
+                        document.getElementById('scanCount').textContent = data.total_scanned;
+                        document.getElementById('headerMatchCount').textContent = data.total_matches;
+                        document.getElementById('headerScanCount').textContent = data.total_scanned;
+                        
+                        // Hide loading
+                        document.getElementById('loadingSection').classList.add('hidden');
+                        
+                        if (data.results.length > 0) {
+                            displayResults(data.results);
+                            document.getElementById('resultsSection').classList.remove('hidden');
+                        } else {
+                            document.getElementById('emptyState').classList.remove('hidden');
+                        }
+                        
+                        document.getElementById('scanButton').disabled = false;
+                    }
+                };
                 
-                // Update stats
-                document.getElementById('matchCount').textContent = data.total_matches;
-                document.getElementById('scanCount').textContent = data.total_scanned;
-                document.getElementById('headerMatchCount').textContent = data.total_matches;
-                document.getElementById('headerScanCount').textContent = data.total_scanned;
+                eventSource.onerror = function(error) {
+                    console.error('EventSource error:', error);
+                    eventSource.close();
+                    document.getElementById('loadingSection').classList.add('hidden');
+                    alert('Error during scan. Please try again.');
+                    document.getElementById('scanButton').disabled = false;
+                };
                 
-                // Hide loading
-                document.getElementById('loadingSection').classList.add('hidden');
-                
-                if (data.matches.length > 0) {
-                    displayResults(data.matches);
-                    document.getElementById('resultsSection').classList.remove('hidden');
-                } else {
-                    document.getElementById('emptyState').classList.remove('hidden');
-                }
             } catch (error) {
                 console.error('Error scanning patterns:', error);
                 alert('Error scanning patterns. Please try again.');
                 document.getElementById('loadingSection').classList.add('hidden');
-            } finally {
                 document.getElementById('scanButton').disabled = false;
             }
         }

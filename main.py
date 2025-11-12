@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -12,6 +12,7 @@ import json
 from functools import lru_cache
 import time
 import os
+import asyncio
 
 # Alpaca imports for real-time data
 from alpaca.data.historical import StockHistoricalDataClient
@@ -45,6 +46,14 @@ else:
 _data_cache = {}
 _cache_timestamp = {}
 CACHE_DURATION = 300  # 5 minutes
+
+# Progress tracking
+_scan_progress = {}
+
+async def send_progress_update(scan_id: str, message: dict):
+    """Send progress update to client"""
+    if scan_id in _scan_progress:
+        _scan_progress[scan_id].append(message)
 
 # Alpaca timeframe conversion
 def get_alpaca_timeframe(timeframe_str: str) -> TimeFrame:
@@ -299,6 +308,151 @@ async def get_tickers():
     """Get list of available tickers"""
     return {"tickers": NASDAQ_TICKERS}
 
+@app.get("/api/scan-stream")
+async def scan_pattern_stream(
+    pattern: str = Query(..., description="Pattern to scan for"),
+    timeframe: str = Query("1d", description="Timeframe: 1m, 5m, 15m, 1h, 1d, 1wk, 1mo"),
+    period: str = Query("1mo", description="Period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y")
+):
+    """Stream scan progress in real-time using Server-Sent Events"""
+    
+    async def event_generator():
+        scan_id = str(time.time())
+        _scan_progress[scan_id] = []
+        results = []
+        
+        try:
+            # Send initial status
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Initializing scan...', 'progress': 0})}\n\n"
+            await asyncio.sleep(0.1)
+            
+            # Check cache
+            cache_key = f"{timeframe}_{period}"
+            current_time = time.time()
+            
+            if (cache_key in _data_cache and 
+                cache_key in _cache_timestamp and 
+                current_time - _cache_timestamp[cache_key] < CACHE_DURATION):
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Using cached data...', 'progress': 5})}\n\n"
+                data_dict = _data_cache[cache_key]
+            else:
+                # Fetch data
+                data_source = "Alpaca (Real-time)" if USE_ALPACA else "Yahoo Finance"
+                yield f"data: {json.dumps({'type': 'status', 'message': f'Downloading data from {data_source}...', 'progress': 10})}\n\n"
+                await asyncio.sleep(0.1)
+                
+                if USE_ALPACA:
+                    data_dict = fetch_alpaca_data(NASDAQ_TICKERS, timeframe, period)
+                else:
+                    tickers_str = " ".join(NASDAQ_TICKERS)
+                    bulk_data = yf.download(
+                        tickers=tickers_str,
+                        period=period,
+                        interval=timeframe,
+                        group_by='ticker',
+                        threads=True,
+                        progress=False
+                    )
+                    
+                    data_dict = {}
+                    for ticker in NASDAQ_TICKERS:
+                        try:
+                            if len(NASDAQ_TICKERS) == 1:
+                                df = bulk_data
+                            else:
+                                df = bulk_data[ticker]
+                            
+                            if not df.empty and len(df) >= 20:
+                                data_dict[ticker] = df
+                        except:
+                            continue
+                
+                _data_cache[cache_key] = data_dict
+                _cache_timestamp[cache_key] = current_time
+            
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Data loaded. Scanning {len(data_dict)} stocks...', 'progress': 20})}\n\n"
+            await asyncio.sleep(0.1)
+            
+            # Process each ticker
+            total_tickers = len(data_dict)
+            processed_count = 0
+            
+            for idx, ticker in enumerate(data_dict.keys()):
+                try:
+                    df = data_dict[ticker]
+                    
+                    if df.empty or len(df) < 20:
+                        continue
+                    
+                    processed_count += 1
+                    progress = 20 + int((idx / total_tickers) * 70)
+                    
+                    # Send progress for this stock
+                    yield f"data: {json.dumps({'type': 'scanning', 'ticker': ticker, 'progress': progress, 'current': idx + 1, 'total': total_tickers})}\n\n"
+                    await asyncio.sleep(0.05)  # Small delay to show progress
+                    
+                    # Detect pattern
+                    pattern_found = False
+                    confidence = 0
+                    
+                    if pattern == "bull_flag":
+                        pattern_found, confidence = detector.detect_bull_flag(df)
+                    elif pattern == "bear_flag":
+                        pattern_found, confidence = detector.detect_bear_flag(df)
+                    elif pattern == "head_shoulders":
+                        pattern_found, confidence = detector.detect_head_shoulders(df)
+                    elif pattern == "double_top":
+                        pattern_found, confidence = detector.detect_double_top(df)
+                    elif pattern == "double_bottom":
+                        pattern_found, confidence = detector.detect_double_bottom(df)
+                    elif pattern == "gap_up":
+                        pattern_found, confidence = detector.detect_gap_up(df)
+                    elif pattern == "gap_down":
+                        pattern_found, confidence = detector.detect_gap_down(df)
+                    elif pattern == "volume_spike":
+                        pattern_found, confidence = detector.detect_volume_spike(df)
+                    elif pattern == "ma_crossover_bullish":
+                        pattern_found, confidence = detector.detect_ma_crossover(df, bullish=True)
+                    elif pattern == "ma_crossover_bearish":
+                        pattern_found, confidence = detector.detect_ma_crossover(df, bullish=False)
+                    
+                    if pattern_found:
+                        current_price = float(df['Close'].iloc[-1])
+                        previous_price = float(df['Close'].iloc[-2])
+                        price_change = ((current_price - previous_price) / previous_price) * 100
+                        
+                        result = {
+                            "ticker": ticker,
+                            "confidence": round(confidence * 100, 2),
+                            "current_price": round(current_price, 2),
+                            "price_change": round(price_change, 2),
+                            "volume": int(df['Volume'].iloc[-1])
+                        }
+                        results.append(result)
+                        
+                        # Send match found event
+                        yield f"data: {json.dumps({'type': 'match', 'result': result})}\n\n"
+                        await asyncio.sleep(0.05)
+                
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'ticker': ticker, 'error': str(e)})}\n\n"
+                    continue
+            
+            # Sort results
+            results.sort(key=lambda x: x['confidence'], reverse=True)
+            
+            # Send completion
+            yield f"data: {json.dumps({'type': 'complete', 'results': results, 'total_scanned': total_tickers, 'total_matches': len(results), 'progress': 100})}\n\n"
+        
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        
+        finally:
+            if scan_id in _scan_progress:
+                del _scan_progress[scan_id]
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 @app.get("/api/scan")
 async def scan_pattern(
     pattern: str = Query(..., description="Pattern to scan for"),
@@ -359,17 +513,26 @@ async def scan_pattern(
         processed_count = 0
         error_count = 0
         
+        print("\n" + "="*60)
+        print(f"🔍 STARTING PATTERN SCAN")
+        print(f"Pattern: {pattern}")
+        print(f"Timeframe: {timeframe}")
+        print(f"Period: {period}")
+        print(f"Data Source: {'Alpaca (Real-time)' if USE_ALPACA else 'Yahoo Finance (15-min delay)'}")
+        print("="*60 + "\n")
+        
         for ticker in NASDAQ_TICKERS:
             try:
                 # Get data for this ticker
                 if ticker not in data_dict:
+                    print(f"⊘ {ticker}: Not in dataset")
                     continue
                 
                 df = data_dict[ticker]
                 
                 # Skip if not enough data
                 if df.empty or len(df) < 20:
-                    print(f"  {ticker}: Insufficient data ({len(df) if not df.empty else 0} bars)")
+                    print(f"⚠️  {ticker}: Insufficient data ({len(df) if not df.empty else 0} bars)")
                     continue
                 
                 processed_count += 1
@@ -400,29 +563,44 @@ async def scan_pattern(
                     pattern_found, confidence = detector.detect_ma_crossover(df, bullish=False)
                 
                 if pattern_found:
-                    print(f"  ✓ {ticker}: Pattern found! Confidence: {confidence:.0%}")
+                    print(f"✅ {ticker}: MATCH FOUND! Confidence: {confidence*100:.1f}%")
                     current_price = float(df['Close'].iloc[-1])
                     previous_price = float(df['Close'].iloc[-2])
                     price_change = ((current_price - previous_price) / previous_price) * 100
                     
                     results.append({
                         "ticker": ticker,
-                        "confidence": round(confidence * 100, 2),  # Convert to percentage
+                        "confidence": round(confidence * 100, 2),
                         "current_price": round(current_price, 2),
                         "price_change": round(price_change, 2),
                         "volume": int(df['Volume'].iloc[-1])
                     })
+                else:
+                    # Show confidence even if below threshold (every 10th stock to avoid spam)
+                    if processed_count % 10 == 0:
+                        print(f"   {ticker}: No match (confidence: {confidence*100:.1f}%)")
             
             except Exception as e:
                 error_count += 1
-                print(f"  ✗ {ticker}: Error - {e}")
+                print(f"❌ {ticker}: Error - {str(e)}")
                 continue
         
-        print(f"\nProcessing Summary:")
-        print(f"  - Tickers in dataset: {len(data_dict)}")
-        print(f"  - Successfully processed: {processed_count}")
-        print(f"  - Errors: {error_count}")
-        print(f"  - Patterns found: {len(results)}")
+        print("\n" + "="*60)
+        print(f"📊 SCAN COMPLETE")
+        print(f"Tickers in dataset: {len(data_dict)}")
+        print(f"Successfully processed: {processed_count}")
+        print(f"Errors encountered: {error_count}")
+        print(f"Patterns found: {len(results)}")
+        
+        if len(results) > 0:
+            print(f"\n🎯 Top Matches:")
+            for i, result in enumerate(results[:5], 1):
+                print(f"  {i}. {result['ticker']}: {result['confidence']}% confidence")
+        else:
+            print(f"\n⚠️  No patterns found above {detector.min_confidence*100}% threshold")
+            print(f"   Consider lowering threshold or trying different pattern/timeframe")
+        
+        print("="*60 + "\n")
         
         # Sort by confidence
         results.sort(key=lambda x: x['confidence'], reverse=True)
