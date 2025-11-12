@@ -9,6 +9,8 @@ from typing import List, Optional
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
+from functools import lru_cache
+import time
 
 from pattern_detector import PatternDetector
 
@@ -20,14 +22,93 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Initialize pattern detector
 detector = PatternDetector()
 
-# NASDAQ 100 tickers (sample list - you can expand this)
-NASDAQ_TICKERS = [
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'COST', 'NFLX',
-    'ASML', 'AMD', 'PEP', 'ADBE', 'CSCO', 'CMCSA', 'TMUS', 'INTC', 'TXN', 'QCOM',
-    'INTU', 'AMAT', 'HON', 'AMGN', 'BKNG', 'ADP', 'SBUX', 'GILD', 'ISRG', 'REGN',
-    'VRTX', 'ADI', 'MU', 'LRCX', 'PANW', 'KLAC', 'MDLZ', 'SNPS', 'CDNS', 'MELI',
-    'PYPL', 'MAR', 'CSX', 'ORLY', 'CRWD', 'ABNB', 'FTNT', 'MNST', 'DASH', 'WDAY'
-]
+# Simple cache for bulk data (expires after 5 minutes)
+_data_cache = {}
+_cache_timestamp = {}
+CACHE_DURATION = 300  # 5 minutes
+
+# Configuration: Choose which NASDAQ list to scan
+# Options: 
+#   "NASDAQ-100" (100 stocks) - Recommended for free tier, fast scans
+#   "NASDAQ-COMPOSITE" (500-3000 stocks) - Full market scan, slower
+# 
+# ⚡ Performance Notes:
+# - NASDAQ-100: ~5-10 seconds per scan
+# - 500 stocks: ~20-30 seconds per scan  
+# - 3000 stocks: ~2-3 minutes per scan (may timeout on free tier)
+#
+# 💡 Tip: Start with NASDAQ-100, upgrade Render plan for full composite
+SCAN_MODE = "NASDAQ-100"  # Change to "NASDAQ-COMPOSITE" for full NASDAQ
+
+# NASDAQ 100 tickers - Full list dynamically fetched
+def get_nasdaq_100_tickers():
+    """Fetch NASDAQ-100 tickers from Wikipedia"""
+    try:
+        import pandas as pd
+        url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+        tables = pd.read_html(url)
+        # The first table contains the ticker list
+        df = tables[4]  # NASDAQ-100 components table
+        tickers = df['Ticker'].tolist()
+        print(f"Fetched {len(tickers)} NASDAQ-100 tickers")
+        return tickers
+    except Exception as e:
+        print(f"Error fetching NASDAQ-100 list: {e}")
+        # Fallback to full hardcoded NASDAQ-100 list
+        return [
+            'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'COST',
+            'NFLX', 'ASML', 'AMD', 'PEP', 'ADBE', 'CSCO', 'CMCSA', 'TMUS', 'INTC', 'TXN',
+            'QCOM', 'INTU', 'AMAT', 'HON', 'AMGN', 'BKNG', 'ADP', 'SBUX', 'GILD', 'ISRG',
+            'REGN', 'VRTX', 'ADI', 'MU', 'LRCX', 'PANW', 'KLAC', 'MDLZ', 'SNPS', 'CDNS',
+            'MELI', 'PYPL', 'MAR', 'CSX', 'ORLY', 'CRWD', 'ABNB', 'FTNT', 'MNST', 'DASH',
+            'WDAY', 'NXPI', 'TEAM', 'PCAR', 'ADSK', 'PAYX', 'ROST', 'MRVL', 'ODFL', 'CPRT',
+            'AEP', 'CTAS', 'CHTR', 'DXCM', 'FAST', 'KDP', 'VRSK', 'TTD', 'BIIB', 'EA',
+            'IDXX', 'KHC', 'CTSH', 'GEHC', 'LULU', 'ANSS', 'FANG', 'EXC', 'ZS', 'DDOG',
+            'ON', 'CSGP', 'BKR', 'XEL', 'ILMN', 'WBD', 'GFS', 'CDW', 'MDB', 'MRNA',
+            'ZM', 'ALGN', 'DLTR', 'WBA', 'ENPH', 'SGEN', 'LCID', 'RIVN', 'ZI', 'HOOD'
+        ]
+
+def get_all_nasdaq_tickers(limit=None):
+    """
+    Fetch ALL NASDAQ Composite tickers (3000+ stocks)
+    
+    Args:
+        limit: Maximum number of tickers to return (None = all stocks)
+               Recommended: 500 for free tier, 1000+ for paid plans
+    """
+    try:
+        import pandas as pd
+        # Use NASDAQ's official FTP feed
+        ftp_url = "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt"
+        df = pd.read_csv(ftp_url, sep="|")
+        
+        # Filter out test symbols and get valid tickers
+        df = df[df['Test Issue'] == 'N']
+        df = df[df['Financial Status'] == 'N']  # Normal financial status
+        tickers = df['Symbol'].str.strip().tolist()
+        
+        # Remove the last row (file trailer) and clean up
+        tickers = [t for t in tickers if t and len(t) <= 5 and t != 'Symbol']
+        
+        # Apply limit if specified
+        if limit:
+            tickers = tickers[:limit]
+        
+        print(f"Fetched {len(tickers)} NASDAQ Composite tickers")
+        return tickers
+    except Exception as e:
+        print(f"Error fetching full NASDAQ list: {e}")
+        # Fallback to NASDAQ-100
+        return get_nasdaq_100_tickers()
+
+# Initialize ticker list on startup based on scan mode
+if SCAN_MODE == "NASDAQ-COMPOSITE":
+    # Limit to 500 stocks for performance (remove limit=500 for all ~3000 stocks)
+    NASDAQ_TICKERS = get_all_nasdaq_tickers(limit=500)
+    print(f"⚡ Scanning mode: FULL NASDAQ COMPOSITE ({len(NASDAQ_TICKERS)} stocks)")
+else:
+    NASDAQ_TICKERS = get_nasdaq_100_tickers()
+    print(f"⚡ Scanning mode: NASDAQ-100 ({len(NASDAQ_TICKERS)} stocks)")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -67,67 +148,106 @@ async def scan_pattern(
     """Scan all tickers for a specific pattern"""
     results = []
     
-    for ticker in NASDAQ_TICKERS:
-        try:
-            # Download data
-            stock = yf.Ticker(ticker)
-            df = stock.history(period=period, interval=timeframe)
-            
-            if df.empty or len(df) < 20:
-                continue
-            
-            # Detect pattern
-            pattern_found = False
-            confidence = 0
-            
-            if pattern == "bull_flag":
-                pattern_found, confidence = detector.detect_bull_flag(df)
-            elif pattern == "bear_flag":
-                pattern_found, confidence = detector.detect_bear_flag(df)
-            elif pattern == "head_shoulders":
-                pattern_found, confidence = detector.detect_head_shoulders(df)
-            elif pattern == "double_top":
-                pattern_found, confidence = detector.detect_double_top(df)
-            elif pattern == "double_bottom":
-                pattern_found, confidence = detector.detect_double_bottom(df)
-            elif pattern == "gap_up":
-                pattern_found, confidence = detector.detect_gap_up(df)
-            elif pattern == "gap_down":
-                pattern_found, confidence = detector.detect_gap_down(df)
-            elif pattern == "volume_spike":
-                pattern_found, confidence = detector.detect_volume_spike(df)
-            elif pattern == "ma_crossover_bullish":
-                pattern_found, confidence = detector.detect_ma_crossover(df, bullish=True)
-            elif pattern == "ma_crossover_bearish":
-                pattern_found, confidence = detector.detect_ma_crossover(df, bullish=False)
-            
-            if pattern_found:
-                current_price = df['Close'].iloc[-1]
-                price_change = ((current_price - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100
-                
-                results.append({
-                    "ticker": ticker,
-                    "confidence": round(confidence, 2),
-                    "current_price": round(current_price, 2),
-                    "price_change": round(price_change, 2),
-                    "volume": int(df['Volume'].iloc[-1])
-                })
+    try:
+        # Check cache
+        cache_key = f"{timeframe}_{period}"
+        current_time = time.time()
         
-        except Exception as e:
-            print(f"Error processing {ticker}: {e}")
-            continue
+        if (cache_key in _data_cache and 
+            cache_key in _cache_timestamp and 
+            current_time - _cache_timestamp[cache_key] < CACHE_DURATION):
+            print(f"Using cached data for {cache_key}")
+            bulk_data = _data_cache[cache_key]
+        else:
+            # BULK DOWNLOAD - Download all tickers at once
+            print(f"Downloading bulk data for {len(NASDAQ_TICKERS)} tickers...")
+            tickers_str = " ".join(NASDAQ_TICKERS)
+            
+            bulk_data = yf.download(
+                tickers=tickers_str,
+                period=period,
+                interval=timeframe,
+                group_by='ticker',
+                threads=True,
+                progress=False
+            )
+            
+            # Cache the data
+            _data_cache[cache_key] = bulk_data
+            _cache_timestamp[cache_key] = current_time
+            print(f"Bulk download complete. Data cached.")
+        
+        # Process each ticker's data
+        for ticker in NASDAQ_TICKERS:
+            try:
+                # Extract data for this ticker
+                if len(NASDAQ_TICKERS) == 1:
+                    df = bulk_data
+                else:
+                    df = bulk_data[ticker]
+                
+                # Skip if not enough data
+                if df.empty or len(df) < 20:
+                    continue
+                
+                # Detect pattern
+                pattern_found = False
+                confidence = 0
+                
+                if pattern == "bull_flag":
+                    pattern_found, confidence = detector.detect_bull_flag(df)
+                elif pattern == "bear_flag":
+                    pattern_found, confidence = detector.detect_bear_flag(df)
+                elif pattern == "head_shoulders":
+                    pattern_found, confidence = detector.detect_head_shoulders(df)
+                elif pattern == "double_top":
+                    pattern_found, confidence = detector.detect_double_top(df)
+                elif pattern == "double_bottom":
+                    pattern_found, confidence = detector.detect_double_bottom(df)
+                elif pattern == "gap_up":
+                    pattern_found, confidence = detector.detect_gap_up(df)
+                elif pattern == "gap_down":
+                    pattern_found, confidence = detector.detect_gap_down(df)
+                elif pattern == "volume_spike":
+                    pattern_found, confidence = detector.detect_volume_spike(df)
+                elif pattern == "ma_crossover_bullish":
+                    pattern_found, confidence = detector.detect_ma_crossover(df, bullish=True)
+                elif pattern == "ma_crossover_bearish":
+                    pattern_found, confidence = detector.detect_ma_crossover(df, bullish=False)
+                
+                if pattern_found:
+                    current_price = df['Close'].iloc[-1]
+                    price_change = ((current_price - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100
+                    
+                    results.append({
+                        "ticker": ticker,
+                        "confidence": round(confidence, 2),
+                        "current_price": round(current_price, 2),
+                        "price_change": round(price_change, 2),
+                        "volume": int(df['Volume'].iloc[-1])
+                    })
+            
+            except Exception as e:
+                print(f"Error processing {ticker}: {e}")
+                continue
+        
+        # Sort by confidence
+        results.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        print(f"Scan complete. Found {len(results)} matches.")
+        
+        return {
+            "pattern": pattern,
+            "timeframe": timeframe,
+            "period": period,
+            "matches": results,
+            "total_scanned": len(NASDAQ_TICKERS),
+            "total_matches": len(results)
+        }
     
-    # Sort by confidence
-    results.sort(key=lambda x: x['confidence'], reverse=True)
-    
-    return {
-        "pattern": pattern,
-        "timeframe": timeframe,
-        "period": period,
-        "matches": results,
-        "total_scanned": len(NASDAQ_TICKERS),
-        "total_matches": len(results)
-    }
+    except Exception as e:
+        print(f"Bulk download error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error downloading data: {str(e)}")
 
 @app.get("/api/chart/{ticker}")
 async def get_chart(
