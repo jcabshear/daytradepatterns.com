@@ -331,19 +331,19 @@ async def scan_pattern_stream(
                     threads=True,
                     progress=False
                 )
-                    
-                    data_dict = {}
-                    for ticker in NASDAQ_TICKERS:
-                        try:
-                            if len(NASDAQ_TICKERS) == 1:
-                                df = bulk_data
-                            else:
-                                df = bulk_data[ticker]
-                            
-                            if not df.empty and len(df) >= 20:
-                                data_dict[ticker] = df
-                        except:
-                            continue
+                
+                data_dict = {}
+                for ticker in NASDAQ_TICKERS:
+                    try:
+                        if len(NASDAQ_TICKERS) == 1:
+                            df = bulk_data
+                        else:
+                            df = bulk_data[ticker]
+                        
+                        if not df.empty and len(df) >= 20:
+                            data_dict[ticker] = df
+                    except:
+                        continue
                 
                 _data_cache[cache_key] = data_dict
                 _cache_timestamp[cache_key] = current_time
@@ -463,20 +463,20 @@ async def scan_pattern(
                 threads=True,
                 progress=False
             )
-                
-                # Convert to dict format
-                data_dict = {}
-                for ticker in NASDAQ_TICKERS:
-                    try:
-                        if len(NASDAQ_TICKERS) == 1:
-                            df = bulk_data
-                        else:
-                            df = bulk_data[ticker]
-                        
-                        if not df.empty and len(df) >= 20:
-                            data_dict[ticker] = df
-                    except:
-                        continue
+            
+            # Convert to dict format
+            data_dict = {}
+            for ticker in NASDAQ_TICKERS:
+                try:
+                    if len(NASDAQ_TICKERS) == 1:
+                        df = bulk_data
+                    else:
+                        df = bulk_data[ticker]
+                    
+                    if not df.empty and len(df) >= 20:
+                        data_dict[ticker] = df
+                except:
+                    continue
             
             # Cache the data
             _data_cache[cache_key] = data_dict
