@@ -11,6 +11,12 @@ from plotly.subplots import make_subplots
 import json
 from functools import lru_cache
 import time
+import os
+
+# Alpaca imports for real-time data
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from pattern_detector import PatternDetector
 
@@ -22,10 +28,101 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Initialize pattern detector
 detector = PatternDetector()
 
+# Alpaca API Configuration
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+USE_ALPACA = bool(ALPACA_API_KEY and ALPACA_SECRET_KEY)
+
+# Initialize Alpaca client if keys are provided
+if USE_ALPACA:
+    alpaca_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+    print("✅ Alpaca real-time data enabled")
+else:
+    alpaca_client = None
+    print("⚠️  Using Yahoo Finance (15-min delay). Set ALPACA_API_KEY and ALPACA_SECRET_KEY for real-time data.")
+
 # Simple cache for bulk data (expires after 5 minutes)
 _data_cache = {}
 _cache_timestamp = {}
 CACHE_DURATION = 300  # 5 minutes
+
+# Alpaca timeframe conversion
+def get_alpaca_timeframe(timeframe_str: str) -> TimeFrame:
+    """Convert timeframe string to Alpaca TimeFrame"""
+    mapping = {
+        "1m": TimeFrame(1, TimeFrameUnit.Minute),
+        "5m": TimeFrame(5, TimeFrameUnit.Minute),
+        "15m": TimeFrame(15, TimeFrameUnit.Minute),
+        "1h": TimeFrame(1, TimeFrameUnit.Hour),
+        "1d": TimeFrame(1, TimeFrameUnit.Day),
+        "1wk": TimeFrame(1, TimeFrameUnit.Week),
+        "1mo": TimeFrame(1, TimeFrameUnit.Month),
+    }
+    return mapping.get(timeframe_str, TimeFrame(1, TimeFrameUnit.Day))
+
+def get_alpaca_period_dates(period: str) -> tuple[datetime, datetime]:
+    """Convert period string to start/end dates"""
+    end_date = datetime.now()
+    
+    period_mapping = {
+        "1d": timedelta(days=1),
+        "5d": timedelta(days=5),
+        "1mo": timedelta(days=30),
+        "3mo": timedelta(days=90),
+        "6mo": timedelta(days=180),
+        "1y": timedelta(days=365),
+        "2y": timedelta(days=730),
+    }
+    
+    delta = period_mapping.get(period, timedelta(days=30))
+    start_date = end_date - delta
+    
+    return start_date, end_date
+
+def fetch_alpaca_data(tickers: List[str], timeframe: str, period: str) -> dict:
+    """Fetch data from Alpaca for multiple tickers"""
+    try:
+        start_date, end_date = get_alpaca_period_dates(period)
+        alpaca_timeframe = get_alpaca_timeframe(timeframe)
+        
+        print(f"Fetching Alpaca data: {len(tickers)} tickers, {timeframe}, {period}")
+        
+        # Create request for all tickers
+        request = StockBarsRequest(
+            symbol_or_symbols=tickers,
+            timeframe=alpaca_timeframe,
+            start=start_date,
+            end=end_date
+        )
+        
+        # Fetch bars
+        bars = alpaca_client.get_stock_bars(request)
+        
+        # Convert to dict of DataFrames (similar to yfinance format)
+        data_dict = {}
+        for ticker in tickers:
+            if ticker in bars.data:
+                ticker_bars = bars.data[ticker]
+                df = pd.DataFrame([{
+                    'Open': bar.open,
+                    'High': bar.high,
+                    'Low': bar.low,
+                    'Close': bar.close,
+                    'Volume': bar.volume,
+                    'timestamp': bar.timestamp
+                } for bar in ticker_bars])
+                
+                if not df.empty:
+                    df.set_index('timestamp', inplace=True)
+                    df.index = pd.to_datetime(df.index)
+                    data_dict[ticker] = df
+        
+        print(f"Successfully fetched data for {len(data_dict)} tickers")
+        return data_dict
+        
+    except Exception as e:
+        print(f"Alpaca fetch error: {e}")
+        raise
 
 # Configuration: Choose which NASDAQ list to scan
 # Options: 
@@ -139,6 +236,69 @@ async def get_tickers():
     """Get list of available tickers"""
     return {"tickers": NASDAQ_TICKERS}
 
+@app.get("/api/debug/{ticker}")
+async def debug_ticker(
+    ticker: str,
+    timeframe: str = Query("1d", description="Timeframe"),
+    period: str = Query("1mo", description="Period")
+):
+    """Debug endpoint to check if data is being fetched correctly"""
+    try:
+        # Fetch data
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period, interval=timeframe)
+        
+        if df.empty:
+            return {
+                "ticker": ticker,
+                "status": "NO DATA",
+                "error": "DataFrame is empty"
+            }
+        
+        # Run all pattern detections
+        patterns_found = {}
+        
+        patterns_to_test = {
+            "bull_flag": detector.detect_bull_flag,
+            "bear_flag": detector.detect_bear_flag,
+            "head_shoulders": detector.detect_head_shoulders,
+            "double_top": detector.detect_double_top,
+            "double_bottom": detector.detect_double_bottom,
+            "gap_up": detector.detect_gap_up,
+            "gap_down": detector.detect_gap_down,
+            "volume_spike": detector.detect_volume_spike,
+            "ma_crossover_bullish": lambda df: detector.detect_ma_crossover(df, bullish=True),
+            "ma_crossover_bearish": lambda df: detector.detect_ma_crossover(df, bullish=False),
+        }
+        
+        for pattern_name, pattern_func in patterns_to_test.items():
+            found, confidence = pattern_func(df)
+            patterns_found[pattern_name] = {
+                "detected": found,
+                "confidence": round(confidence, 2)
+            }
+        
+        return {
+            "ticker": ticker,
+            "status": "SUCCESS",
+            "data_points": len(df),
+            "date_range": f"{df.index[0]} to {df.index[-1]}",
+            "latest_price": round(df['Close'].iloc[-1], 2),
+            "patterns": patterns_found
+        }
+    
+    except Exception as e:
+        return {
+            "ticker": ticker,
+            "status": "ERROR",
+            "error": str(e)
+        }
+
+@app.get("/api/tickers")
+async def get_tickers():
+    """Get list of available tickers"""
+    return {"tickers": NASDAQ_TICKERS}
+
 @app.get("/api/scan")
 async def scan_pattern(
     pattern: str = Query(..., description="Pattern to scan for"),
@@ -157,38 +317,62 @@ async def scan_pattern(
             cache_key in _cache_timestamp and 
             current_time - _cache_timestamp[cache_key] < CACHE_DURATION):
             print(f"Using cached data for {cache_key}")
-            bulk_data = _data_cache[cache_key]
+            data_dict = _data_cache[cache_key]
         else:
-            # BULK DOWNLOAD - Download all tickers at once
-            print(f"Downloading bulk data for {len(NASDAQ_TICKERS)} tickers...")
-            tickers_str = " ".join(NASDAQ_TICKERS)
-            
-            bulk_data = yf.download(
-                tickers=tickers_str,
-                period=period,
-                interval=timeframe,
-                group_by='ticker',
-                threads=True,
-                progress=False
-            )
+            # Fetch data using Alpaca if available, otherwise yfinance
+            if USE_ALPACA:
+                print("🚀 Using Alpaca real-time data")
+                data_dict = fetch_alpaca_data(NASDAQ_TICKERS, timeframe, period)
+            else:
+                print("📊 Using Yahoo Finance (15-min delay)")
+                # Fallback to yfinance bulk download
+                tickers_str = " ".join(NASDAQ_TICKERS)
+                bulk_data = yf.download(
+                    tickers=tickers_str,
+                    period=period,
+                    interval=timeframe,
+                    group_by='ticker',
+                    threads=True,
+                    progress=False
+                )
+                
+                # Convert to dict format
+                data_dict = {}
+                for ticker in NASDAQ_TICKERS:
+                    try:
+                        if len(NASDAQ_TICKERS) == 1:
+                            df = bulk_data
+                        else:
+                            df = bulk_data[ticker]
+                        
+                        if not df.empty and len(df) >= 20:
+                            data_dict[ticker] = df
+                    except:
+                        continue
             
             # Cache the data
-            _data_cache[cache_key] = bulk_data
+            _data_cache[cache_key] = data_dict
             _cache_timestamp[cache_key] = current_time
-            print(f"Bulk download complete. Data cached.")
+            print(f"Data fetched and cached.")
         
         # Process each ticker's data
+        processed_count = 0
+        error_count = 0
+        
         for ticker in NASDAQ_TICKERS:
             try:
-                # Extract data for this ticker
-                if len(NASDAQ_TICKERS) == 1:
-                    df = bulk_data
-                else:
-                    df = bulk_data[ticker]
+                # Get data for this ticker
+                if ticker not in data_dict:
+                    continue
+                
+                df = data_dict[ticker]
                 
                 # Skip if not enough data
                 if df.empty or len(df) < 20:
+                    print(f"  {ticker}: Insufficient data ({len(df) if not df.empty else 0} bars)")
                     continue
+                
+                processed_count += 1
                 
                 # Detect pattern
                 pattern_found = False
@@ -216,20 +400,29 @@ async def scan_pattern(
                     pattern_found, confidence = detector.detect_ma_crossover(df, bullish=False)
                 
                 if pattern_found:
-                    current_price = df['Close'].iloc[-1]
-                    price_change = ((current_price - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100
+                    print(f"  ✓ {ticker}: Pattern found! Confidence: {confidence:.0%}")
+                    current_price = float(df['Close'].iloc[-1])
+                    previous_price = float(df['Close'].iloc[-2])
+                    price_change = ((current_price - previous_price) / previous_price) * 100
                     
                     results.append({
                         "ticker": ticker,
-                        "confidence": round(confidence, 2),
+                        "confidence": round(confidence * 100, 2),  # Convert to percentage
                         "current_price": round(current_price, 2),
                         "price_change": round(price_change, 2),
                         "volume": int(df['Volume'].iloc[-1])
                     })
             
             except Exception as e:
-                print(f"Error processing {ticker}: {e}")
+                error_count += 1
+                print(f"  ✗ {ticker}: Error - {e}")
                 continue
+        
+        print(f"\nProcessing Summary:")
+        print(f"  - Tickers in dataset: {len(data_dict)}")
+        print(f"  - Successfully processed: {processed_count}")
+        print(f"  - Errors: {error_count}")
+        print(f"  - Patterns found: {len(results)}")
         
         # Sort by confidence
         results.sort(key=lambda x: x['confidence'], reverse=True)
@@ -242,12 +435,13 @@ async def scan_pattern(
             "period": period,
             "matches": results,
             "total_scanned": len(NASDAQ_TICKERS),
-            "total_matches": len(results)
+            "total_matches": len(results),
+            "data_source": "Alpaca (Real-time)" if USE_ALPACA else "Yahoo Finance (15-min delay)"
         }
     
     except Exception as e:
-        print(f"Bulk download error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error downloading data: {str(e)}")
+        print(f"Scan error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error scanning: {str(e)}")
 
 @app.get("/api/chart/{ticker}")
 async def get_chart(
@@ -257,8 +451,16 @@ async def get_chart(
 ):
     """Get interactive chart for a specific ticker"""
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period=period, interval=timeframe)
+        # Fetch data using Alpaca if available, otherwise yfinance
+        if USE_ALPACA:
+            data_dict = fetch_alpaca_data([ticker], timeframe, period)
+            if ticker in data_dict:
+                df = data_dict[ticker]
+            else:
+                raise HTTPException(status_code=404, detail="No data found")
+        else:
+            stock = yf.Ticker(ticker)
+            df = stock.history(period=period, interval=timeframe)
         
         if df.empty:
             raise HTTPException(status_code=404, detail="No data found")
@@ -335,8 +537,10 @@ async def get_chart(
             row=2, col=1
         )
         
+        data_source = "Alpaca (Real-time)" if USE_ALPACA else "Yahoo Finance (15-min delay)"
+        
         fig.update_layout(
-            title=f'{ticker} - {timeframe} Chart',
+            title=f'{ticker} - {timeframe} Chart ({data_source})',
             yaxis_title='Price ($)',
             xaxis_rangeslider_visible=False,
             height=600,

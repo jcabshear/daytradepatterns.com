@@ -6,7 +6,8 @@ class PatternDetector:
     """Detect various trading patterns in stock data"""
     
     def __init__(self):
-        self.min_confidence = 0.5
+        # Lowered from 0.5 to 0.3 to catch more patterns
+        self.min_confidence = 0.3
     
     def detect_bull_flag(self, df: pd.DataFrame) -> tuple[bool, float]:
         """
