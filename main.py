@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -9,14 +8,14 @@ from typing import List, Optional
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
-from functools import lru_cache
 import time
 import os
 import asyncio
 
 from pattern_detector import PatternDetector
+from marketstack_client import MarketstackClient
 
-app = FastAPI(title="NASDAQ Pattern Scanner")
+app = FastAPI(title="NASDAQ Pattern Scanner - Powered by Marketstack")
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -24,101 +23,31 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Initialize pattern detector
 detector = PatternDetector()
 
-# Simple cache for bulk data (expires after 5 minutes)
-_data_cache = {}
-_cache_timestamp = {}
-CACHE_DURATION = 300  # 5 minutes
+# Initialize Marketstack client
+MARKETSTACK_API_KEY = os.getenv('MARKETSTACK_API_KEY')
+if not MARKETSTACK_API_KEY:
+    raise RuntimeError("⚠️  MARKETSTACK_API_KEY environment variable not set!")
 
-# Progress tracking
-_scan_progress = {}
+marketstack = MarketstackClient(MARKETSTACK_API_KEY)
+print("✅ Marketstack client initialized")
 
-async def send_progress_update(scan_id: str, message: dict):
-    """Send progress update to client"""
-    if scan_id in _scan_progress:
-        _scan_progress[scan_id].append(message)
+# NASDAQ-100 tickers (optimized for batch API calls)
+# 100 stocks = 1 API call with Marketstack!
+NASDAQ_TICKERS = [
+    'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'COST',
+    'NFLX', 'ASML', 'AMD', 'PEP', 'ADBE', 'CSCO', 'CMCSA', 'TMUS', 'INTC', 'TXN',
+    'QCOM', 'INTU', 'AMAT', 'HON', 'AMGN', 'BKNG', 'ADP', 'SBUX', 'GILD', 'ISRG',
+    'REGN', 'VRTX', 'ADI', 'MU', 'LRCX', 'PANW', 'KLAC', 'MDLZ', 'SNPS', 'CDNS',
+    'MELI', 'PYPL', 'MAR', 'CSX', 'ORLY', 'CRWD', 'ABNB', 'FTNT', 'MNST', 'DASH',
+    'WDAY', 'NXPI', 'TEAM', 'PCAR', 'ADSK', 'PAYX', 'ROST', 'MRVL', 'ODFL', 'CPRT',
+    'AEP', 'CTAS', 'CHTR', 'DXCM', 'FAST', 'KDP', 'VRSK', 'TTD', 'BIIB', 'EA',
+    'IDXX', 'KHC', 'CTSH', 'GEHC', 'LULU', 'ANSS', 'FANG', 'EXC', 'ZS', 'DDOG',
+    'ON', 'CSGP', 'BKR', 'XEL', 'ILMN', 'WBD', 'GFS', 'CDW', 'MDB', 'MRNA',
+    'ZM', 'ALGN', 'DLTR', 'WBA', 'ENPH', 'SGEN', 'LCID', 'RIVN', 'ZI', 'HOOD'
+]
 
-# Configuration: Choose which NASDAQ list to scan
-# Options: 
-#   "NASDAQ-100" (100 stocks) - Recommended for free tier, fast scans
-#   "NASDAQ-COMPOSITE" (500-3000 stocks) - Full market scan, slower
-# 
-# ⚡ Performance Notes:
-# - NASDAQ-100: ~5-10 seconds per scan
-# - 500 stocks: ~20-30 seconds per scan  
-# - 3000 stocks: ~2-3 minutes per scan (may timeout on free tier)
-#
-# 💡 Tip: Start with NASDAQ-100, upgrade Render plan for full composite
-SCAN_MODE = "NASDAQ-100"  # Change to "NASDAQ-COMPOSITE" for full NASDAQ
-
-# NASDAQ 100 tickers - Full list dynamically fetched
-def get_nasdaq_100_tickers():
-    """Fetch NASDAQ-100 tickers from Wikipedia"""
-    try:
-        import pandas as pd
-        url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-        tables = pd.read_html(url)
-        # The first table contains the ticker list
-        df = tables[4]  # NASDAQ-100 components table
-        tickers = df['Ticker'].tolist()
-        print(f"Fetched {len(tickers)} NASDAQ-100 tickers")
-        return tickers
-    except Exception as e:
-        print(f"Error fetching NASDAQ-100 list: {e}")
-        # Fallback to full hardcoded NASDAQ-100 list
-        return [
-            'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'COST',
-            'NFLX', 'ASML', 'AMD', 'PEP', 'ADBE', 'CSCO', 'CMCSA', 'TMUS', 'INTC', 'TXN',
-            'QCOM', 'INTU', 'AMAT', 'HON', 'AMGN', 'BKNG', 'ADP', 'SBUX', 'GILD', 'ISRG',
-            'REGN', 'VRTX', 'ADI', 'MU', 'LRCX', 'PANW', 'KLAC', 'MDLZ', 'SNPS', 'CDNS',
-            'MELI', 'PYPL', 'MAR', 'CSX', 'ORLY', 'CRWD', 'ABNB', 'FTNT', 'MNST', 'DASH',
-            'WDAY', 'NXPI', 'TEAM', 'PCAR', 'ADSK', 'PAYX', 'ROST', 'MRVL', 'ODFL', 'CPRT',
-            'AEP', 'CTAS', 'CHTR', 'DXCM', 'FAST', 'KDP', 'VRSK', 'TTD', 'BIIB', 'EA',
-            'IDXX', 'KHC', 'CTSH', 'GEHC', 'LULU', 'ANSS', 'FANG', 'EXC', 'ZS', 'DDOG',
-            'ON', 'CSGP', 'BKR', 'XEL', 'ILMN', 'WBD', 'GFS', 'CDW', 'MDB', 'MRNA',
-            'ZM', 'ALGN', 'DLTR', 'WBA', 'ENPH', 'SGEN', 'LCID', 'RIVN', 'ZI', 'HOOD'
-        ]
-
-def get_all_nasdaq_tickers(limit=None):
-    """
-    Fetch ALL NASDAQ Composite tickers (3000+ stocks)
-    
-    Args:
-        limit: Maximum number of tickers to return (None = all stocks)
-               Recommended: 500 for free tier, 1000+ for paid plans
-    """
-    try:
-        import pandas as pd
-        # Use NASDAQ's official FTP feed
-        ftp_url = "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt"
-        df = pd.read_csv(ftp_url, sep="|")
-        
-        # Filter out test symbols and get valid tickers
-        df = df[df['Test Issue'] == 'N']
-        df = df[df['Financial Status'] == 'N']  # Normal financial status
-        tickers = df['Symbol'].str.strip().tolist()
-        
-        # Remove the last row (file trailer) and clean up
-        tickers = [t for t in tickers if t and len(t) <= 5 and t != 'Symbol']
-        
-        # Apply limit if specified
-        if limit:
-            tickers = tickers[:limit]
-        
-        print(f"Fetched {len(tickers)} NASDAQ Composite tickers")
-        return tickers
-    except Exception as e:
-        print(f"Error fetching full NASDAQ list: {e}")
-        # Fallback to NASDAQ-100
-        return get_nasdaq_100_tickers()
-
-# Initialize ticker list on startup based on scan mode
-if SCAN_MODE == "NASDAQ-COMPOSITE":
-    # Limit to 500 stocks for performance (remove limit=500 for all ~3000 stocks)
-    NASDAQ_TICKERS = get_all_nasdaq_tickers(limit=500)
-    print(f"⚡ Scanning mode: FULL NASDAQ COMPOSITE ({len(NASDAQ_TICKERS)} stocks)")
-else:
-    NASDAQ_TICKERS = get_nasdaq_100_tickers()
-    print(f"⚡ Scanning mode: NASDAQ-100 ({len(NASDAQ_TICKERS)} stocks)")
+print(f"📊 NASDAQ-100 loaded: {len(NASDAQ_TICKERS)} stocks")
+print(f"💰 API Efficiency: {len(NASDAQ_TICKERS)} stocks = 1 API call!")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -149,128 +78,45 @@ async def get_tickers():
     """Get list of available tickers"""
     return {"tickers": NASDAQ_TICKERS}
 
-@app.get("/api/debug/{ticker}")
-async def debug_ticker(
-    ticker: str,
-    timeframe: str = Query("1d", description="Timeframe"),
-    period: str = Query("1mo", description="Period")
-):
-    """Debug endpoint to check if data is being fetched correctly"""
-    try:
-        # Fetch data
-        stock = yf.Ticker(ticker)
-        df = stock.history(period=period, interval=timeframe)
-        
-        if df.empty:
-            return {
-                "ticker": ticker,
-                "status": "NO DATA",
-                "error": "DataFrame is empty"
-            }
-        
-        # Run all pattern detections
-        patterns_found = {}
-        
-        patterns_to_test = {
-            "bull_flag": detector.detect_bull_flag,
-            "bear_flag": detector.detect_bear_flag,
-            "head_shoulders": detector.detect_head_shoulders,
-            "double_top": detector.detect_double_top,
-            "double_bottom": detector.detect_double_bottom,
-            "gap_up": detector.detect_gap_up,
-            "gap_down": detector.detect_gap_down,
-            "volume_spike": detector.detect_volume_spike,
-            "ma_crossover_bullish": lambda df: detector.detect_ma_crossover(df, bullish=True),
-            "ma_crossover_bearish": lambda df: detector.detect_ma_crossover(df, bullish=False),
-        }
-        
-        for pattern_name, pattern_func in patterns_to_test.items():
-            found, confidence = pattern_func(df)
-            patterns_found[pattern_name] = {
-                "detected": found,
-                "confidence": round(confidence, 2)
-            }
-        
-        return {
-            "ticker": ticker,
-            "status": "SUCCESS",
-            "data_points": len(df),
-            "date_range": f"{df.index[0]} to {df.index[-1]}",
-            "latest_price": round(df['Close'].iloc[-1], 2),
-            "patterns": patterns_found
-        }
-    
-    except Exception as e:
-        return {
-            "ticker": ticker,
-            "status": "ERROR",
-            "error": str(e)
-        }
-
-@app.get("/api/tickers")
-async def get_tickers():
-    """Get list of available tickers"""
-    return {"tickers": NASDAQ_TICKERS}
+@app.get("/api/usage")
+async def get_api_usage():
+    """Get API usage statistics"""
+    stats = marketstack.get_usage_stats()
+    return {
+        "api_calls_made": stats['total_api_calls'],
+        "cache_entries": stats['cache_entries'],
+        "cache_hit_rate": f"{stats['cache_hit_rate']:.1f}%",
+        "estimated_monthly_usage": stats['total_api_calls'] * 30  # Rough estimate
+    }
 
 @app.get("/api/scan-stream")
 async def scan_pattern_stream(
     pattern: str = Query(..., description="Pattern to scan for"),
-    timeframe: str = Query("1d", description="Timeframe: 1m, 5m, 15m, 1h, 1d, 1wk, 1mo"),
+    timeframe: str = Query("1d", description="Timeframe: 1d, 1h, 30m, 15m, 5m, 1m"),
     period: str = Query("1mo", description="Period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y")
 ):
     """Stream scan progress in real-time using Server-Sent Events"""
     
     async def event_generator():
-        scan_id = str(time.time())
-        _scan_progress[scan_id] = []
         results = []
         
         try:
             # Send initial status
-            yield f"data: {json.dumps({'type': 'status', 'message': 'Initializing scan...', 'progress': 0})}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Initializing Marketstack API...', 'progress': 0})}\n\n"
             await asyncio.sleep(0.1)
             
-            # Check cache
-            cache_key = f"{timeframe}_{period}"
-            current_time = time.time()
+            # Fetch ALL data in ONE API call (this is the magic!)
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Fetching data for 100 stocks in 1 API call...', 'progress': 10})}\n\n"
+            await asyncio.sleep(0.1)
             
-            if (cache_key in _data_cache and 
-                cache_key in _cache_timestamp and 
-                current_time - _cache_timestamp[cache_key] < CACHE_DURATION):
-                yield f"data: {json.dumps({'type': 'status', 'message': 'Using cached data...', 'progress': 5})}\n\n"
-                data_dict = _data_cache[cache_key]
-            else:
-                # Fetch data
-                yield f"data: {json.dumps({'type': 'status', 'message': 'Downloading data from Yahoo Finance...', 'progress': 10})}\n\n"
-                await asyncio.sleep(0.1)
-                
-                tickers_str = " ".join(NASDAQ_TICKERS)
-                bulk_data = yf.download(
-                    tickers=tickers_str,
-                    period=period,
-                    interval=timeframe,
-                    group_by='ticker',
-                    threads=True,
-                    progress=False
-                )
-                
-                data_dict = {}
-                for ticker in NASDAQ_TICKERS:
-                    try:
-                        if len(NASDAQ_TICKERS) == 1:
-                            df = bulk_data
-                        else:
-                            df = bulk_data[ticker]
-                        
-                        if not df.empty and len(df) >= 20:
-                            data_dict[ticker] = df
-                    except:
-                        continue
-                
-                _data_cache[cache_key] = data_dict
-                _cache_timestamp[cache_key] = current_time
+            # Single batch API call for all tickers
+            data_dict = marketstack.get_historical_data(
+                symbols=NASDAQ_TICKERS,
+                timeframe=timeframe,
+                period=period
+            )
             
-            yield f"data: {json.dumps({'type': 'status', 'message': f'Data loaded. Scanning {len(data_dict)} stocks...', 'progress': 20})}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Data loaded! Scanning {len(data_dict)} stocks...', 'progress': 30})}\n\n"
             await asyncio.sleep(0.1)
             
             # Process each ticker
@@ -285,11 +131,11 @@ async def scan_pattern_stream(
                         continue
                     
                     processed_count += 1
-                    progress = 20 + int((idx / total_tickers) * 70)
+                    progress = 30 + int((idx / total_tickers) * 60)
                     
-                    # Send progress for this stock
+                    # Send progress
                     yield f"data: {json.dumps({'type': 'scanning', 'ticker': ticker, 'progress': progress, 'current': idx + 1, 'total': total_tickers})}\n\n"
-                    await asyncio.sleep(0.05)  # Small delay to show progress
+                    await asyncio.sleep(0.03)  # Small delay for smooth UI
                     
                     # Detect pattern
                     pattern_found = False
@@ -318,8 +164,8 @@ async def scan_pattern_stream(
                     
                     if pattern_found:
                         current_price = float(df['Close'].iloc[-1])
-                        previous_price = float(df['Close'].iloc[-2])
-                        price_change = ((current_price - previous_price) / previous_price) * 100
+                        previous_price = float(df['Close'].iloc[-2]) if len(df) > 1 else current_price
+                        price_change = ((current_price - previous_price) / previous_price) * 100 if previous_price != 0 else 0
                         
                         result = {
                             "ticker": ticker,
@@ -332,101 +178,63 @@ async def scan_pattern_stream(
                         
                         # Send match found event
                         yield f"data: {json.dumps({'type': 'match', 'result': result})}\n\n"
-                        await asyncio.sleep(0.05)
+                        await asyncio.sleep(0.03)
                 
                 except Exception as e:
                     yield f"data: {json.dumps({'type': 'error', 'ticker': ticker, 'error': str(e)})}\n\n"
                     continue
             
-            # Sort results
+            # Sort results by confidence
             results.sort(key=lambda x: x['confidence'], reverse=True)
             
-            # Send completion
-            yield f"data: {json.dumps({'type': 'complete', 'results': results, 'total_scanned': total_tickers, 'total_matches': len(results), 'progress': 100})}\n\n"
+            # Get API usage stats
+            usage_stats = marketstack.get_usage_stats()
+            
+            # Send completion with API usage info
+            yield f"data: {json.dumps({{'type': 'complete', 'results': results, 'total_scanned': total_tickers, 'total_matches': len(results), 'progress': 100, 'api_calls_used': usage_stats['total_api_calls']}})}\n\n"
         
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
-        
-        finally:
-            if scan_id in _scan_progress:
-                del _scan_progress[scan_id]
+            error_msg = str(e)
+            print(f"❌ Scan error: {error_msg}")
+            yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/api/scan")
 async def scan_pattern(
     pattern: str = Query(..., description="Pattern to scan for"),
-    timeframe: str = Query("1d", description="Timeframe: 1m, 5m, 15m, 1h, 1d, 1wk, 1mo"),
+    timeframe: str = Query("1d", description="Timeframe: 1d, 1h, 30m, 15m, 5m, 1m"),
     period: str = Query("1mo", description="Period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y")
 ):
-    """Scan all tickers for a specific pattern"""
+    """Scan all tickers for a specific pattern (fallback for non-streaming)"""
     results = []
     
     try:
-        # Check cache
-        cache_key = f"{timeframe}_{period}"
-        current_time = time.time()
-        
-        if (cache_key in _data_cache and 
-            cache_key in _cache_timestamp and 
-            current_time - _cache_timestamp[cache_key] < CACHE_DURATION):
-            print(f"Using cached data for {cache_key}")
-            data_dict = _data_cache[cache_key]
-        else:
-            # Fetch data using Yahoo Finance
-            print("📊 Using Yahoo Finance (15-min delay)")
-            # Fallback to yfinance bulk download
-            tickers_str = " ".join(NASDAQ_TICKERS)
-            bulk_data = yf.download(
-                tickers=tickers_str,
-                period=period,
-                interval=timeframe,
-                group_by='ticker',
-                threads=True,
-                progress=False
-            )
-            
-            # Convert to dict format
-            data_dict = {}
-            for ticker in NASDAQ_TICKERS:
-                try:
-                    if len(NASDAQ_TICKERS) == 1:
-                        df = bulk_data
-                    else:
-                        df = bulk_data[ticker]
-                    
-                    if not df.empty and len(df) >= 20:
-                        data_dict[ticker] = df
-                except:
-                    continue
-            
-            # Cache the data
-            _data_cache[cache_key] = data_dict
-            _cache_timestamp[cache_key] = current_time
-            print(f"Data fetched and cached.")
-        
-        # Process each ticker's data
-        processed_count = 0
-        error_count = 0
-        
         print("\n" + "="*60)
-        print(f"🔍 STARTING PATTERN SCAN")
+        print(f"🔍 STARTING MARKETSTACK PATTERN SCAN")
         print(f"Pattern: {pattern}")
         print(f"Timeframe: {timeframe}")
         print(f"Period: {period}")
-        print(f"Data Source: Yahoo Finance (15-min delay)")
         print("="*60 + "\n")
         
-        for ticker in NASDAQ_TICKERS:
+        # Single batch API call for all tickers
+        print(f"📡 Fetching {len(NASDAQ_TICKERS)} stocks in 1 API call...")
+        data_dict = marketstack.get_historical_data(
+            symbols=NASDAQ_TICKERS,
+            timeframe=timeframe,
+            period=period
+        )
+        
+        print(f"✅ Data received for {len(data_dict)} stocks\n")
+        
+        # Process each ticker
+        processed_count = 0
+        error_count = 0
+        
+        for ticker in data_dict.keys():
             try:
-                # Get data for this ticker
-                if ticker not in data_dict:
-                    print(f"⊘ {ticker}: Not in dataset")
-                    continue
-                
                 df = data_dict[ticker]
                 
-                # Skip if not enough data
                 if df.empty or len(df) < 20:
                     print(f"⚠️  {ticker}: Insufficient data ({len(df) if not df.empty else 0} bars)")
                     continue
@@ -459,10 +267,10 @@ async def scan_pattern(
                     pattern_found, confidence = detector.detect_ma_crossover(df, bullish=False)
                 
                 if pattern_found:
-                    print(f"✅ {ticker}: MATCH FOUND! Confidence: {confidence*100:.1f}%")
+                    print(f"✅ {ticker}: MATCH! Confidence: {confidence*100:.1f}%")
                     current_price = float(df['Close'].iloc[-1])
-                    previous_price = float(df['Close'].iloc[-2])
-                    price_change = ((current_price - previous_price) / previous_price) * 100
+                    previous_price = float(df['Close'].iloc[-2]) if len(df) > 1 else current_price
+                    price_change = ((current_price - previous_price) / previous_price) * 100 if previous_price != 0 else 0
                     
                     results.append({
                         "ticker": ticker,
@@ -471,37 +279,33 @@ async def scan_pattern(
                         "price_change": round(price_change, 2),
                         "volume": int(df['Volume'].iloc[-1])
                     })
-                else:
-                    # Show confidence even if below threshold (every 10th stock to avoid spam)
-                    if processed_count % 10 == 0:
-                        print(f"   {ticker}: No match (confidence: {confidence*100:.1f}%)")
+                elif processed_count % 10 == 0:
+                    print(f"   {ticker}: No match (confidence: {confidence*100:.1f}%)")
             
             except Exception as e:
                 error_count += 1
                 print(f"❌ {ticker}: Error - {str(e)}")
                 continue
         
+        # Sort by confidence
+        results.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Get API usage
+        usage_stats = marketstack.get_usage_stats()
+        
         print("\n" + "="*60)
         print(f"📊 SCAN COMPLETE")
-        print(f"Tickers in dataset: {len(data_dict)}")
         print(f"Successfully processed: {processed_count}")
-        print(f"Errors encountered: {error_count}")
         print(f"Patterns found: {len(results)}")
+        print(f"API calls used: {usage_stats['total_api_calls']}")
+        print(f"Cache hit rate: {usage_stats['cache_hit_rate']:.1f}%")
         
         if len(results) > 0:
             print(f"\n🎯 Top Matches:")
             for i, result in enumerate(results[:5], 1):
                 print(f"  {i}. {result['ticker']}: {result['confidence']}% confidence")
-        else:
-            print(f"\n⚠️  No patterns found above {detector.min_confidence*100}% threshold")
-            print(f"   Consider lowering threshold or trying different pattern/timeframe")
         
         print("="*60 + "\n")
-        
-        # Sort by confidence
-        results.sort(key=lambda x: x['confidence'], reverse=True)
-        
-        print(f"Scan complete. Found {len(results)} matches.")
         
         return {
             "pattern": pattern,
@@ -510,11 +314,11 @@ async def scan_pattern(
             "matches": results,
             "total_scanned": len(NASDAQ_TICKERS),
             "total_matches": len(results),
-            "data_source": "Yahoo Finance (15-min delay)"
+            "api_calls_used": usage_stats['total_api_calls']
         }
     
     except Exception as e:
-        print(f"Scan error: {e}")
+        print(f"❌ Scan error: {e}")
         raise HTTPException(status_code=500, detail=f"Error scanning: {str(e)}")
 
 @app.get("/api/chart/{ticker}")
@@ -525,12 +329,17 @@ async def get_chart(
 ):
     """Get interactive chart for a specific ticker"""
     try:
-        # Fetch data using Yahoo Finance
-        stock = yf.Ticker(ticker)
-        df = stock.history(period=period, interval=timeframe)
+        # Fetch data for single ticker
+        data_dict = marketstack.get_historical_data(
+            symbols=[ticker],
+            timeframe=timeframe,
+            period=period
+        )
         
-        if df.empty:
-            raise HTTPException(status_code=404, detail="No data found")
+        if ticker not in data_dict or data_dict[ticker].empty:
+            raise HTTPException(status_code=404, detail="No data found for this ticker")
+        
+        df = data_dict[ticker]
         
         # Calculate technical indicators
         df['SMA_20'] = df['Close'].rolling(window=20).mean()
@@ -619,27 +428,20 @@ async def get_chart(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/stock/{ticker}")
-async def get_stock_info(ticker: str):
-    """Get detailed stock information"""
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        
-        return {
-            "ticker": ticker,
-            "name": info.get("longName", ticker),
-            "sector": info.get("sector", "N/A"),
-            "industry": info.get("industry", "N/A"),
-            "market_cap": info.get("marketCap", 0),
-            "pe_ratio": info.get("trailingPE", 0),
-            "dividend_yield": info.get("dividendYield", 0),
-            "52_week_high": info.get("fiftyTwoWeekHigh", 0),
-            "52_week_low": info.get("fiftyTwoWeekLow", 0)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/api/cache/clear")
+async def clear_cache():
+    """Clear the Marketstack cache"""
+    marketstack.clear_cache()
+    return {"message": "Cache cleared successfully"}
 
 if __name__ == "__main__":
     import uvicorn
+    print("\n" + "="*60)
+    print("🚀 NASDAQ Pattern Scanner with Marketstack")
+    print("="*60)
+    print(f"📊 Scanning {len(NASDAQ_TICKERS)} NASDAQ-100 stocks")
+    print(f"💰 API Efficiency: 1 API call per scan (batch request)")
+    print(f"🔄 15-minute caching enabled")
+    print(f"🌐 Starting server on http://0.0.0.0:8000")
+    print("="*60 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)

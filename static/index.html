@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pattern Scanner - Live Market Analysis</title>
+    <title>Pattern Scanner - Powered by Marketstack</title>
     <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -101,6 +101,19 @@
             max-width: 1600px;
             margin: 0 auto;
             padding: 32px 24px;
+        }
+        
+        /* API Status Badge */
+        .api-status {
+            background: rgba(0, 200, 5, 0.1);
+            border: 1px solid rgba(0, 200, 5, 0.3);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            color: var(--accent-green);
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
         
         /* Scanner Controls */
@@ -664,6 +677,9 @@
                 <div class="stat-label">Patterns Found</div>
                 <div class="stat-value" id="headerMatchCount">--</div>
             </div>
+            <div class="api-status">
+                <span>🚀 Marketstack API</span>
+            </div>
         </div>
     </header>
     
@@ -693,10 +709,9 @@
                         <option value="1m">1 Minute</option>
                         <option value="5m">5 Minutes</option>
                         <option value="15m">15 Minutes</option>
+                        <option value="30m">30 Minutes</option>
                         <option value="1h">1 Hour</option>
                         <option value="1d" selected>1 Day</option>
-                        <option value="1wk">1 Week</option>
-                        <option value="1mo">1 Month</option>
                     </select>
                 </div>
                 
@@ -888,6 +903,8 @@
                         }
                         
                         document.getElementById('scanButton').disabled = false;
+                        
+                        console.log(`✅ Scan complete. API calls used: ${data.api_calls_used || 1}`);
                     }
                 };
                 
