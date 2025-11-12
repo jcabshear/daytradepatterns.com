@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import os
 import time
-from functools import lru_cache
 
 class MarketstackClient:
     """Highly optimized Marketstack API client"""
@@ -37,7 +36,7 @@ class MarketstackClient:
     def _get_from_cache(self, cache_key: str) -> Optional[Dict]:
         """Get data from cache if valid"""
         if self._is_cache_valid(cache_key):
-            print(f"✅ Cache hit: {cache_key} (saved 1 API call)")
+            print(f"✅ Cache hit: {cache_key[:50]}... (saved 1 API call)")
             return self.cache[cache_key]
         return None
     
@@ -143,12 +142,22 @@ class MarketstackClient:
                 'Volume': item['volume']
             })
         
-        # Convert to DataFrames
-        for symbol in result:
-            df = pd.DataFrame(result[symbol])
-            df['Date'] = pd.to_datetime(df['Date'])
-            df = df.sort_values('Date').set_index('Date')
-            result[symbol] = df
+        # Convert to DataFrames - FIXED VERSION
+        for symbol in list(result.keys()):
+            try:
+                df = pd.DataFrame(result[symbol])
+                # Convert Date column to datetime
+                df['Date'] = pd.to_datetime(df['Date'])
+                # Sort by date
+                df = df.sort_values('Date')
+                # Set Date as index properly
+                df.index = pd.DatetimeIndex(df['Date'])
+                # Drop the Date column
+                df = df.drop(columns=['Date'])
+                result[symbol] = df
+            except Exception as e:
+                print(f"⚠️  Error processing {symbol}: {e}")
+                del result[symbol]
         
         # Cache the result
         self._save_to_cache(cache_key, result)
@@ -223,12 +232,18 @@ class MarketstackClient:
                 'Volume': item['volume']
             })
         
-        # Convert to DataFrames
-        for symbol in result:
-            df = pd.DataFrame(result[symbol])
-            df['Date'] = pd.to_datetime(df['Date'])
-            df = df.sort_values('Date').set_index('Date')
-            result[symbol] = df
+        # Convert to DataFrames - FIXED VERSION
+        for symbol in list(result.keys()):
+            try:
+                df = pd.DataFrame(result[symbol])
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.sort_values('Date')
+                df.index = pd.DatetimeIndex(df['Date'])
+                df = df.drop(columns=['Date'])
+                result[symbol] = df
+            except Exception as e:
+                print(f"⚠️  Error processing {symbol}: {e}")
+                del result[symbol]
         
         # Cache the result
         self._save_to_cache(cache_key, result)
